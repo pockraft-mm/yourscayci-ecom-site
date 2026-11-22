@@ -74,7 +74,7 @@ async function placeOrder(customer: string, phone: string, address: string, note
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 }
 
-async function route(req: IncomingMessage, res: ServerResponse) {
+export async function route(req: IncomingMessage, res: ServerResponse) {
   await customerReady;
   const path = new URL(req.url ?? '/', 'http://localhost').pathname;
   if (req.method === 'GET' && path === '/api/products') return send(res, await listProducts());
@@ -209,8 +209,12 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   send(res, { error: 'Not found' }, 404);
 }
 
-const server = createServer((req, res) => { route(req, res).catch(error => { console.error(error); if (!res.headersSent) send(res, { error: 'Server error' }, 500); }); });
-if (process.env.NODE_ENV !== 'test') server.listen(Number(process.env.PORT || 8787), '127.0.0.1', () => console.log('API ready'));
+export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
+  try { await route(req, res); } catch (error) { console.error(error); if (!res.headersSent) send(res, { error: 'Server error' }, 500); }
+}
+
+const server = createServer((req, res) => { handleRequest(req, res); });
+if (!process.env.VERCEL && process.env.NODE_ENV !== 'test') server.listen(Number(process.env.PORT || 8787), '127.0.0.1', () => console.log('API ready'));
 
 export async function seedCatalog() {
   for (const product of catalog) {
