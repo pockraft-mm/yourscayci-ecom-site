@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createHash, createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import pg from 'pg';
+import { telegramIdentity } from './telegram.js';
 import { products as catalog } from '../src/products.js';
 import { authorizationUrl, exchangeIdentity, providerConfig, type Provider } from './social.js';
 
@@ -147,6 +148,16 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
   if (req.method === 'GET' && path === '/api/products') return send(res, await listProducts());
   if (req.method === 'GET' && path === '/api/store/banner') { const { rows } = await pool.query('SELECT key, value FROM admin_settings WHERE key IN ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)', ['store_banner_desktop','store_banner_mobile','store_banner','store_banner_desktop_view','store_banner_mobile_view','store_banner_desktop_position','store_banner_mobile_position','store_banner_desktop_zoom','store_banner_mobile_zoom','store_banner_desktop_x','store_banner_desktop_y','store_banner_mobile_x','store_banner_mobile_y']); const values = Object.fromEntries(rows.map(row => [row.key, row.value])); const view=(key:string,positionKey:string,zoomKey:string,xKey:string,yKey:string)=>({ fit: values[key] === 'contain' ? 'contain' : 'cover', position: ['top','center','bottom'].includes(values[positionKey]) ? values[positionKey] : 'center', zoom: Math.min(180,Math.max(100,Number(values[zoomKey]||100))), x: Math.min(100,Math.max(0,Number(values[xKey]||50))), y: Math.min(100,Math.max(0,Number(values[yKey]||50))) }); return send(res, { desktop: values.store_banner_desktop ?? values.store_banner ?? null, mobile: values.store_banner_mobile ?? values.store_banner_desktop ?? values.store_banner ?? null, desktopView: view('store_banner_desktop_view','store_banner_desktop_position','store_banner_desktop_zoom','store_banner_desktop_x','store_banner_desktop_y'), mobileView: view('store_banner_mobile_view','store_banner_mobile_position','store_banner_mobile_zoom','store_banner_mobile_x','store_banner_mobile_y') }); }
   if (req.method === 'GET' && path === '/api/customer/providers') return send(res, { telegram: !!providerConfig('telegram'), tiktok: !!providerConfig('tiktok') });
+  if (req.method === 'POST' && path === '/api/customer/telegram-miniapp') {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return send(res, { error: 'Telegram Mini App sign-in is not configured' }, 503);
+    const input = await body(req);
+    let identity;
+    try { identity = telegramIdentity(String(input.initData || ''), token); }
+    catch { return send(res, { error: 'Telegram sign-in expired or invalid. Reopen the Mini App.' }, 401); }
+    const { rows } = await pool.query(`INSERT INTO customer_accounts (email,password_hash,name,phone,city,delivery_address,telegram_id) VALUES (NULL,$1,$2,'','','',$3) ON CONFLICT (telegram_id) DO UPDATE SET telegram_id=EXCLUDED.telegram_id RETURNING id::text,email,name,phone,city,delivery_address AS "deliveryAddress"`, ['!telegram-only:' + randomBytes(32).toString('hex'), identity.name, identity.id]);
+    return send(res, { profile: rows[0] }, 200, { 'Set-Cookie': authCookie(rows[0].id) });
+  }
   const oauth = path.match(/^\/api\/customer\/oauth\/(telegram|tiktok)\/(start|callback)$/);
   if (req.method === 'GET' && oauth) {
     const provider = oauth[1] as Provider; const config = providerConfig(provider);
