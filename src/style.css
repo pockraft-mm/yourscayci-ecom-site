@@ -95,3 +95,9 @@ header a{font-size:14px;color:var(--muted)!important}header nav{gap:8px}header n
   .customer:not(.route-page) .card-copy b{font-size:13px;white-space:nowrap}
   .customer:not(.route-page) .view-product{font-size:12px;margin-top:7px}
 }
+
+.mobile-guide{display:none}
+@media(max-width:640px){
+  .mobile-guide{display:grid;position:fixed;right:22px;bottom:112px;z-index:21;width:min(260px,calc(100vw - 44px));gap:5px;padding:16px 42px 16px 16px;border:1px solid rgba(255,255,255,.85);border-radius:16px;background:rgba(255,255,255,.92);box-shadow:0 14px 36px rgba(34,30,48,.18);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);color:#292333;font-size:12px}
+  .mobile-guide b{font-size:13px;color:#7046c5}.mobile-guide span{color:#68707d;line-height:1.45}.mobile-guide button{position:absolute;right:10px;top:8px;width:25px;height:25px;border:0;border-radius:50%;background:#f1edff;color:#7046c5;font-size:18px;line-height:1}.mobile-guide i{position:absolute;right:45px;bottom:-12px;width:22px;height:22px;background:rgba(255,255,255,.92);border-right:1px solid rgba(255,255,255,.85);border-bottom:1px solid rgba(255,255,255,.85);transform:rotate(45deg)}
+}
