@@ -39,3 +39,29 @@
 @media(max-width:380px){
   header nav{justify-content:flex-start}.brand small{display:none}.variant-buttons{grid-template-columns:1fr}.page-title h1{font-size:26px}.detail-info h1{font-size:32px}
 }
+
+/* UI update: shadcn-inspired tokens with Apple HIG spacing and liquid-glass surfaces. */
+:root{
+  --background:#f7f8fb;--foreground:#17181c;--muted:#68707d;--border:#e5e7eb;
+  --surface:rgba(255,255,255,.78);--surface-solid:#fff;--accent:#8b5cf6;
+  --accent-soft:#f1edff;--radius:18px;--shadow:0 14px 36px rgba(25,28,38,.08);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+  color:var(--foreground);background:var(--background);font-synthesis:none;
+}
+body{background:radial-gradient(circle at 10% 0%,#fff 0,transparent 34rem),var(--background);color:var(--foreground);line-height:1.45}
+button,input,select,textarea{font-family:inherit}
+button,a{transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+header{height:72px;padding:0 clamp(20px,5vw,72px);border-bottom:1px solid rgba(229,231,235,.72);background:rgba(255,255,255,.72);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px);box-shadow:0 1px 0 rgba(255,255,255,.8);}
+header a{font-size:14px;color:var(--muted)!important}header nav{gap:8px}header nav a{padding:9px 12px;border-radius:999px}header nav a:hover{background:var(--accent-soft);color:#6841bd!important}
+.brand{gap:9px!important;align-items:baseline}.brand .logo{font-size:21px!important;font-weight:700;letter-spacing:-.045em;color:#8b5cf6!important}.brand small{color:#6d5a8d!important;font-weight:600}
+.customer{max-width:1240px;padding:48px clamp(20px,5vw,72px) 76px}.page-title{border:0;margin-bottom:28px;align-items:end}.page-title h1{font-size:36px;font-weight:700;letter-spacing:-.04em;margin:0}.page-title span{color:var(--muted);font-size:14px}
+.grid{gap:22px}.card{border:1px solid rgba(229,231,235,.9);background:var(--surface);box-shadow:0 8px 26px rgba(25,28,38,.045);border-radius:var(--radius);}.card:hover{transform:translateY(-3px);box-shadow:var(--shadow);border-color:#d8cdfd}.product-image{background:#eef0f5;border-radius:var(--radius) var(--radius) 0 0}.card-copy{padding:18px}.card h2{font-weight:650;letter-spacing:-.02em}.card-copy b{font-weight:700}.view-product{display:block;color:var(--accent);font-size:13px;margin-top:10px}
+.site-footer{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:22px clamp(20px,5vw,72px);border-top:1px solid var(--border);background:rgba(255,255,255,.66);color:var(--muted);font-size:13px}.site-footer a{color:#8b5cf6;text-decoration:none;font-weight:600}.site-footer a:hover{text-decoration:underline;text-underline-offset:3px}
+.account-card,.invoice,.admin-section,.stats div,.price-product{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);box-shadow:0 8px 26px rgba(25,28,38,.04)}
+.account-card{box-shadow:var(--shadow)}.account-card input,.account-card textarea,.checkout-fields input,.login input,.price-product input,.date-tools input,.price-product select{border:1px solid #d9dde5;border-radius:11px;background:rgba(255,255,255,.9);outline:0}.account-card input:focus,.account-card textarea:focus,.checkout-fields input:focus,.login input:focus,.price-product input:focus{border-color:#a78bfa;box-shadow:0 0 0 3px #ede9fe}
+.account-card button,.account-link,.bag button,.login button,.price-product button,td button,.modal-primary,.new-product-toggle{border-radius:11px;background:#17181c;color:#fff;box-shadow:0 5px 12px rgba(23,24,28,.14)}.account-card button:hover,.account-link:hover,.bag button:hover,.login button:hover,.price-product button:hover,.new-product-toggle:hover{background:#30313a;transform:translateY(-1px)}
+.admin-layout{background:var(--background)}.admin-layout aside{background:rgba(255,255,255,.72);backdrop-filter:blur(18px);border-right:1px solid var(--border)}.admin-layout aside button{border:0;background:transparent;border-radius:10px;text-align:left;padding:10px 12px}.admin-layout aside button:hover{background:var(--accent-soft)}.admin-main{max-width:1240px}.admin-heading{border:0}.admin-heading h1{font-weight:700;letter-spacing:-.04em}.stats{gap:16px}.stats div{padding:20px}.admin-section{padding:20px}.order-panel{padding:0}.catalog-card{border:1px solid var(--border);border-radius:14px;background:var(--surface-solid);overflow:hidden}.catalog-card summary{padding:16px 18px}.product-editor{border-top:1px solid var(--border)}
+.photo-editor-card,.photo-editor-tile{border-color:var(--border);border-radius:14px}.photo-editor-tile.selected{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+@media(max-width:640px){
+  header{padding:12px 16px}.customer{padding:30px 16px 52px}.page-title h1{font-size:32px}.site-footer{align-items:flex-start;flex-direction:column;gap:6px;padding:20px 16px}.site-footer a{font-size:12px}.card:hover{transform:none}.account-card,.invoice,.admin-section{border-radius:14px}.admin-main{padding:24px 16px 48px}
+}
