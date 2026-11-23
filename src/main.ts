@@ -144,7 +144,7 @@ function bindNewProductPanel(){const form=document.querySelector<HTMLFormElement
 function bindStatusSelects(){document.querySelectorAll<HTMLSelectElement>('[data-status-select]').forEach(select=>select.onchange=async()=>{select.disabled=true;await status(select.dataset.statusSelect!,select.value)})}
 function bindQuickAdd(){document.querySelectorAll<HTMLButtonElement>('[data-quick-add]').forEach(button=>button.onclick=e=>{e.preventDefault();const tone=button.dataset.quickAdd!,old=cart.find(item=>item.tone===tone&&item.variant===0);old?old.quantity++:cart.push({tone,variant:0,quantity:1});saveCart();render()})}
 function bind(){document.querySelector('#login')?.addEventListener('submit',loginSubmit);document.querySelector('#logout')?.addEventListener('click',async()=>{await api('/admin/logout',{method:'POST'});isAdmin=false;render()});document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab!;render()});document.querySelectorAll<HTMLButtonElement>('[data-order-tab]').forEach(b=>b.onclick=()=>{orderTab=b.dataset.orderTab!;render()});document.querySelectorAll<HTMLButtonElement>('[data-add]').forEach(b=>b.onclick=()=>{const t=b.dataset.add!,v=Number((document.querySelector(`#v-${t.replace(/ /g,'-')}`)as HTMLSelectElement).value),old=cart.find(i=>i.tone===t&&i.variant===v);old?old.quantity++:cart.push({tone:t,variant:v,quantity:1});saveCart();render()});document.querySelector('#checkout')?.addEventListener('click',checkout);document.querySelectorAll<HTMLButtonElement>('[data-status]').forEach(b=>b.onclick=()=>status(b.dataset.status!,b.dataset.next!));document.querySelectorAll<HTMLFormElement>('[data-price]').forEach(f=>f.onsubmit=async e=>{e.preventDefault();const d=new FormData(f);await api(`/admin/products/${encodeURIComponent(String(d.get('tone')))}/variants/${d.get('variant')}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({price:Number(d.get('price'))})});products=await api<Product[]>('/products');render()});document.querySelector('#new-product')?.addEventListener('submit',createProduct);document.querySelectorAll<HTMLFormElement>('[data-edit-product]').forEach(f=>f.addEventListener('submit',editProduct));document.querySelectorAll<HTMLButtonElement>('[data-delete]').forEach(b=>b.onclick=()=>deleteProduct(b.dataset.delete!));document.querySelector('#change-pass')?.addEventListener('submit',changePass);document.querySelector('#find-order')?.addEventListener('click',findOrder);}
-function shop(){if(location.pathname==='/forgot-password'||location.pathname==='/reset-password')return authPage(location.pathname);return `<main class="customer"><div class="page-title"><h1>${tx('Shop','စျေးဝယ်ရန်')}</h1><span>${products.length} ${tx('products','ကုန်ပစ္စည်းများ')}</span></div><section id="catalog" class="grid">${products.map(p=>`<a class="card product-link" href="/product/${encodeURIComponent(p.tone)}"><div class="product-image"><img src="${image(p.images[0])}" alt="${esc(p.name)}"><span>${esc(p.name)}</span></div><div class="card-copy"><h2>${esc(p.name)}</h2><b>${tx('From','စျေးနှုန်းမှ')} ${esc(p.prices[0].price)}</b><span class="view-product">${tx('View product','အသေးစိတ်ကြည့်ရန်')}</span></div></a>`).join('')}</section></main>`}
+function shop(){if(location.pathname==='/forgot-password'||location.pathname==='/reset-password')return authPage(location.pathname);return `<main class="customer"><div class="page-title"><h1>${tx('Shop','စျေးဝယ်ရန်')}</h1><span>${products.length} ${tx('products','ကုန်ပစ္စည်းများ')}</span></div>${socialButtons()}<section id="catalog" class="grid">${products.map(p=>`<a class="card product-link" href="/product/${encodeURIComponent(p.tone)}"><div class="product-image"><img src="${image(p.images[0])}" alt="${esc(p.name)}"><span>${esc(p.name)}</span></div><div class="card-copy"><h2>${esc(p.name)}</h2><b>${tx('From','စျေးနှုန်းမှ')} ${esc(p.prices[0].price)}</b><span class="view-product">${tx('View product','အသေးစိတ်ကြည့်ရန်')}</span></div></a>`).join('')}</section></main>`}
 function cartPage(){
   const complete=!!customerProfile?.name&&!!customerProfile.phone&&!!customerProfile.city&&!!customerProfile.deliveryAddress;
   const delivery=customerProfile?`<div class="delivery-summary"><b>${complete?`Deliver to ${esc(customerProfile.name)}`:'Delivery details needed'}</b>${complete?`<p>${esc(customerProfile.phone)} · ${esc(customerProfile.city)}</p><p>${esc(customerProfile.deliveryAddress)}</p>`:'<p>Add your name, phone, city or town, and delivery address before ordering.</p>'}<a href="/profile">${complete?'Edit delivery details':'Complete profile'}</a></div>`:'<div class="delivery-summary"><p>Sign in to save your delivery details and place an order.</p><a class="account-link" href="/login?next=%2Fcart">Sign in</a> <a href="/signup?next=%2Fcart">Create account</a></div>';
@@ -174,7 +174,13 @@ function authPage(route:string){
 const telegramInitData = new URLSearchParams(location.hash.slice(1)).get('tgWebAppData') || '';
 if(telegramInitData)sessionStorage.setItem('yc_telegram_init',telegramInitData);
 const miniAppData=()=>telegramInitData||sessionStorage.getItem('yc_telegram_init')||'';
-function socialButtons(){return `<div class="social-signin"><span>Or continue with</span>${miniAppData()?'<button type="button" data-telegram-login>Sign in with Telegram</button>':'<a href="https://t.me/yourscayciorderbot?startapp">Open in Telegram</a>'}</div>`}
+function socialButtons(){return miniAppData()?'':`<div class="social-signin"><a href="https://t.me/yourscayciorderbot?startapp">${tx('Shop in Telegram','Telegram မှ စျေးဝယ်ရန်')}</a></div>`}
+async function storefrontSession(){
+  const signIn=async()=>{const result=await api<{profile:CustomerProfile}>('/customer/telegram-miniapp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:miniAppData()})});sessionStorage.removeItem('yc_telegram_init');return {authenticated:true,profile:result.profile}};
+  if(telegramInitData)return signIn();
+  const session=await api<{authenticated:boolean;profile:CustomerProfile|null}>('/customer/session');
+  return !session.authenticated&&miniAppData()?signIn():session;
+}
 document.addEventListener('click',async event=>{
   const button=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-telegram-login]');
   if(!button)return;
@@ -241,11 +247,13 @@ function cachedCatalog():Product[]|null{try{const saved=JSON.parse(localStorage.
 async function start(){
   if(developerRoute()){try{isDeveloper=(await api<{authenticated:boolean}>('/developer/session')).authenticated}catch{isDeveloper=false}render();return}
   if(adminRoute()){render();try{isAdmin=(await api<{authenticated:boolean}>('/admin/session')).authenticated;if(isAdmin)[products,orders]=await Promise.all([api<Product[]>('/products'),api<Order[]>('/admin/orders')]);render()}catch{return}return}
+  if(miniAppData()&&(location.pathname==='/login'||location.pathname.startsWith('/signup')))history.replaceState(null,'','/'+location.hash);
   const initialCatalog=cachedCatalog();
   if(initialCatalog&&(location.pathname==='/'||location.pathname.startsWith('/product/'))){products=initialCatalog;render();bindLocaleToggle()}
   else if(location.pathname==='/'){render();bindLocaleToggle();document.querySelector('#catalog')!.innerHTML='<p role="status">Loading products…</p>'}
   const catalogRequest=api<Product[]>('/products').catch(()=>null);
-  const sessionRequest=api<{authenticated:boolean;profile:CustomerProfile|null}>('/customer/session').catch(()=>null);
+  let sessionError='';
+  const sessionRequest=storefrontSession().catch(error=>{if(miniAppData())sessionError=(error as Error).message;return null});
   const providersRequest=location.pathname.startsWith('/signup')||location.pathname==='/login'?api<{telegram:boolean;tiktok:boolean}>('/customer/providers').catch(()=>null):Promise.resolve(null);
   try{
     if((await api<{maintenance:boolean}>('/store/status')).maintenance){maintenanceScreen();return}
@@ -259,5 +267,6 @@ async function start(){
     if(session)customerProfile=session.profile;
     if(providers)socialProviders=providers;
     if(session?.profile||providers)render();
+    if(sessionError)notify(sessionError);
   }catch{if(products.length){render();return}document.querySelector('#app')!.innerHTML='<main class="empty">Store unavailable</main>'}
 }start();
