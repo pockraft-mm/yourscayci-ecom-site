@@ -1,6 +1,7 @@
 import { loadEnvFile } from 'node:process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
 import pg from 'pg';
 import { products as catalog } from '../src/products.js';
 import { authorizationUrl, exchangeIdentity, providerConfig, type Provider } from './social.js';
@@ -12,15 +13,47 @@ let passcode = process.env.ADMIN_PASSCODE ?? '';
 const superadminPasscode = process.env.SUPERADMIN_PASSCODE ?? '';
 const sessionSecret = process.env.SESSION_SECRET ?? '';
 if (!process.env.DATABASE_URL || !passcode || !sessionSecret) throw new Error('DATABASE_URL, ADMIN_PASSCODE and SESSION_SECRET are required');
-const loginAttempts = new Map<string, { count: number; until: number }>();
 const ready = pool.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_fit text NOT NULL DEFAULT 'cover' CHECK (cover_fit IN ('cover', 'contain')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_position text NOT NULL DEFAULT 'center' CHECK (cover_position IN ('top', 'center', 'bottom')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_zoom integer NOT NULL DEFAULT 100 CHECK (cover_zoom BETWEEN 100 AND 200); CREATE TABLE IF NOT EXISTS customer_accounts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text UNIQUE, password_hash text NOT NULL, name text NOT NULL, phone text NOT NULL, city text NOT NULL, delivery_address text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())").then(() => pool.query("ALTER TABLE customer_accounts ALTER COLUMN email DROP NOT NULL; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS phone_key text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS telegram_id text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS tiktok_id text UNIQUE")).then(() => pool.query("CREATE INDEX IF NOT EXISTS orders_user_date_idx ON orders (user_id, created_at DESC); CREATE TABLE IF NOT EXISTS system_events (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_type text NOT NULL, method text, path text, status integer, user_id bigint, message text, created_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS system_events_created_idx ON system_events (created_at DESC); CREATE INDEX IF NOT EXISTS system_events_type_created_idx ON system_events (event_type, created_at DESC); CREATE TABLE IF NOT EXISTS password_resets (token_hash text PRIMARY KEY, user_id bigint NOT NULL REFERENCES customer_accounts(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS password_resets_user_created_idx ON password_resets(user_id,created_at DESC)")).then(() => pool.query("SELECT value FROM admin_settings WHERE key = 'passcode'")).then(({ rows }) => { if (rows[0]?.value) passcode = rows[0].value; });
+const staffReady = ready.then(() => pool.query("CREATE TABLE IF NOT EXISTS staff_sessions (token_hash text PRIMARY KEY, role text NOT NULL CHECK (role IN ('admin','developer')), credential_version text NOT NULL, expires_at timestamptz NOT NULL); CREATE INDEX IF NOT EXISTS staff_sessions_expires_idx ON staff_sessions(expires_at); CREATE TABLE IF NOT EXISTS staff_login_attempts (role text NOT NULL, key_hash text NOT NULL, failures integer NOT NULL DEFAULT 0, blocked_until timestamptz, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (role,key_hash))"));
 
 type Item = { tone: string; variant: number; quantity: number };
 const send = (res: ServerResponse, value: unknown, status = 200, headers: Record<string, string> = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)); };
 const safeEqual = (a: string, b: string) => { const left = createHmac('sha256', sessionSecret).update(a).digest(); const right = createHmac('sha256', sessionSecret).update(b).digest(); return timingSafeEqual(left, right); };
 const sign = (value: string) => createHmac('sha256', sessionSecret).update(value).digest('hex');
-const admin = (req: IncomingMessage) => { const cookie = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_admin='))?.slice(9); if (!cookie) return false; const [expiry, nonce, mac] = cookie.split('.'); return !!expiry && !!nonce && !!mac && Number(expiry) > Date.now() && safeEqual(mac, sign(`${expiry}.${nonce}`)); };
-const developer = (req: IncomingMessage) => { const cookie = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_superadmin='))?.slice(14); if (!cookie) return false; const [expiry, nonce, mac] = cookie.split('.'); return !!expiry && !!nonce && !!mac && Number(expiry) > Date.now() && safeEqual(mac, sign(`developer.${expiry}.${nonce}`)); };
+const deriveStaffPasscode = promisify(scrypt);
+const hashStaffPasscode = async (value: string) => { const salt = randomBytes(16).toString('hex'); const hash = await deriveStaffPasscode(value, salt, 64) as Buffer; return `scrypt$${salt}$${hash.toString('hex')}`; };
+const verifyStaffPasscode = async (value: string, stored: string) => { if (!stored.startsWith('scrypt$')) return safeEqual(value, stored); const [,salt,hash] = stored.split('$'); if (!/^[a-f0-9]{32}$/.test(salt ?? '') || !/^[a-f0-9]{128}$/.test(hash ?? '')) return false; const actual = await deriveStaffPasscode(value, salt, 64) as Buffer; return timingSafeEqual(actual, Buffer.from(hash, 'hex')); };
+type StaffRole = 'admin' | 'developer';
+const staffName = (role: StaffRole) => role === 'admin' ? 'yc_admin' : 'yc_superadmin';
+const staffPath = (role: StaffRole) => `/api/${role === 'admin' ? 'admin' : 'developer'}`;
+const staffToken = (role: StaffRole, req: IncomingMessage) => req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith(`${staffName(role)}=`))?.slice(staffName(role).length + 1) ?? '';
+const staffHash = (token: string) => createHash('sha256').update(token).digest('hex');
+const staffVersion = (role: StaffRole) => sign(`staff.${role}.${role === 'admin' ? passcode : superadminPasscode}`);
+const refreshAdminPasscode = async () => { const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key='passcode'"); let current = rows[0]?.value ?? process.env.ADMIN_PASSCODE ?? ''; if (rows[0]?.value && !current.startsWith('scrypt$')) { const upgraded = await hashStaffPasscode(current); const saved = await pool.query("UPDATE admin_settings SET value=$1 WHERE key='passcode' AND value=$2 RETURNING value", [upgraded, current]); current = saved.rows[0]?.value ?? (await pool.query("SELECT value FROM admin_settings WHERE key='passcode'")).rows[0]?.value ?? current; } passcode = current; };
+const staffSession = async (role: StaffRole, req: IncomingMessage) => {
+  if (role === 'admin') await refreshAdminPasscode();
+  const token = staffToken(role, req);
+  if (!/^[a-f0-9]{64}$/.test(token)) return false;
+  const { rows } = await pool.query('SELECT 1 FROM staff_sessions WHERE token_hash=$1 AND role=$2 AND credential_version=$3 AND expires_at>now()', [staffHash(token), role, staffVersion(role)]);
+  return rows.length > 0;
+};
+const admin = (req: IncomingMessage) => staffSession('admin', req);
+const developer = (req: IncomingMessage) => staffSession('developer', req);
+const issueStaffSession = async (role: StaffRole) => {
+  const token = randomBytes(32).toString('hex');
+  const age = role === 'admin' ? 4 * 60 * 60 : 2 * 60 * 60;
+  await pool.query('INSERT INTO staff_sessions(token_hash,role,credential_version,expires_at) VALUES($1,$2,$3,$4)', [staffHash(token), role, staffVersion(role), new Date(Date.now() + age * 1000)]);
+  return `${staffName(role)}=${token}; HttpOnly; SameSite=Strict; Path=${staffPath(role)}; Max-Age=${age}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`;
+};
+const revokeStaffSession = async (role: StaffRole, req: IncomingMessage) => { const token = staffToken(role, req); if (/^[a-f0-9]{64}$/.test(token)) await pool.query('DELETE FROM staff_sessions WHERE token_hash=$1 AND role=$2', [staffHash(token), role]); };
+const clearStaffCookie = (role: StaffRole) => `${staffName(role)}=; HttpOnly; SameSite=Strict; Path=${staffPath(role)}; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`;
+const staffIpKey = (role: StaffRole, req: IncomingMessage) => {
+  const forwarded = process.env.VERCEL ? req.headers['x-vercel-forwarded-for'] : undefined;
+  const address = (typeof forwarded === 'string' ? forwarded.split(',')[0] : req.socket.remoteAddress) || 'unknown';
+  return createHmac('sha256', sessionSecret).update(`${role}.${address}`).digest('hex');
+};
+const staffLocked = async (role: StaffRole, key: string) => { const { rows } = await pool.query('SELECT 1 FROM staff_login_attempts WHERE role=$1 AND key_hash=$2 AND blocked_until>now()', [role, key]); return rows.length > 0; };
+const staffFailed = async (role: StaffRole, key: string) => pool.query("INSERT INTO staff_login_attempts(role,key_hash,failures,blocked_until,updated_at) VALUES($1,$2,1,NULL,now()) ON CONFLICT(role,key_hash) DO UPDATE SET failures=CASE WHEN staff_login_attempts.updated_at<now()-interval '15 minutes' THEN 1 ELSE staff_login_attempts.failures+1 END, blocked_until=CASE WHEN staff_login_attempts.updated_at<now()-interval '15 minutes' THEN NULL WHEN staff_login_attempts.failures+1>=5 THEN now()+interval '15 minutes' ELSE NULL END, updated_at=now()", [role, key]);
 type Customer = { id: string; email: string | null; name: string; phone: string; city: string; deliveryAddress: string };
 const customerCookie = (req: IncomingMessage) => req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_customer='))?.slice(12);
 const customerSession = async (req: IncomingMessage): Promise<Customer | null> => {
@@ -49,6 +82,9 @@ const oauthStateCookie = (provider: Provider) => `yc_oauth_${provider}`;
 const clearOauthCookie = (provider: Provider) => `${oauthStateCookie(provider)}=; HttpOnly; SameSite=Lax; Path=/api/customer/oauth/${provider}/callback; Max-Age=0`;
 const body = async (req: IncomingMessage) => { let text = ''; for await (const chunk of req) { text += chunk; if (text.length > 50_000_000) throw new Error('Request too large'); } return JSON.parse(text) as Record<string, unknown>; };
 const recordEvent = (event: { eventType: string; req: IncomingMessage; status?: number; message?: string }) => { const cookie = event.req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_customer='))?.slice(12); const userId = cookie?.split('.')[0]; void pool.query('INSERT INTO system_events(event_type,method,path,status,user_id,message) VALUES($1,$2,$3,$4,$5,$6)', [event.eventType, event.req.method ?? null, new URL(event.req.url ?? '/', 'http://localhost').pathname, event.status ?? null, userId && /^\d+$/.test(userId) ? userId : null, event.message?.slice(0, 500) ?? null]).catch(() => undefined); };
+let requestLogging: 'full' | 'errors-only' = 'full';
+let requestLoggingExpires = 0;
+const getRequestLogging = async () => { if (Date.now() < requestLoggingExpires) return requestLogging; const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key='request_logging'"); requestLogging = rows[0]?.value === 'errors-only' ? 'errors-only' : 'full'; requestLoggingExpires = Date.now() + 30_000; return requestLogging; };
 const landingAsset = (key: string) => ({ 'chocobrown-1.png': 'product-stocking-chocobrown.png', 'magicblack-1.jpg': 'product-stocking-magicblack-1.jpg', 'skincolor-1.png': 'product-stocking-skincolor-1.png' }[key] ?? key);
 const imageUrl = (key: string) => { if (key.startsWith('data:image/') || key.startsWith('https://')) return key; const clean = decodeURIComponent(key.replace(/^\/products\//, '').replace(/^\//, '')); return `/${landingAsset(clean).split('/').map(encodeURIComponent).join('/')}`; };
 
@@ -78,8 +114,29 @@ async function placeOrder(customer: string, phone: string, address: string, note
 }
 
 export async function route(req: IncomingMessage, res: ServerResponse) {
-  await customerReady;
+  await Promise.all([customerReady, staffReady]);
   const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+  if (path.startsWith('/api/admin/') || path.startsWith('/api/developer/')) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (!['GET','HEAD'].includes(req.method ?? 'GET')) {
+      const origin = req.headers.origin;
+      let sameOrigin = true;
+      try {
+        if (origin) {
+          const source = new URL(origin);
+          const forwardedHost = req.headers['x-forwarded-host'];
+          const hosts = [req.headers.host, typeof forwardedHost === 'string' ? forwardedHost : undefined, process.env.PUBLIC_SITE_URL ? new URL(process.env.PUBLIC_SITE_URL).host : undefined];
+          sameOrigin = hosts.includes(source.host);
+          if (!sameOrigin && !process.env.VERCEL) {
+            const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
+            sameOrigin = loopback.has(source.hostname) && loopback.has(new URL(`http://${req.headers.host}`).hostname);
+          }
+        }
+      } catch { sameOrigin = false; }
+      if (!sameOrigin || req.headers['sec-fetch-site'] === 'cross-site') return send(res, { error: 'Cross-site request rejected' }, 403);
+    }
+  }
   if (path === '/api/store/status' && req.method === 'GET') { const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key = 'maintenance_mode'"); return send(res, { maintenance: rows[0]?.value === 'on' }); }
   if (!path.startsWith('/api/developer/') && !path.startsWith('/api/admin/') && path !== '/api/store/status') {
     const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key = 'maintenance_mode'");
@@ -135,7 +192,7 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
         } catch (error) {
           await pool.query('DELETE FROM password_resets WHERE token_hash=$1', [hash]);
           console.error('Password reset delivery failed:', error);
-          return send(res, { error: 'Could not send a recovery email. Try again later.' }, 503);
+          // Return the same response for known and unknown email addresses.
         }
       }
     }
@@ -191,14 +248,17 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
   }
   if (req.method === 'POST' && path === '/api/developer/login') {
     if (!superadminPasscode) return send(res, { error: 'Developer access is not configured' }, 503);
+    const key = staffIpKey('developer', req);
+    if (await staffLocked('developer', key)) return send(res, { error: 'Try again later' }, 429);
     const input = await body(req);
-    if (typeof input.passcode !== 'string' || !safeEqual(input.passcode, superadminPasscode)) return send(res, { error: 'Invalid developer passcode' }, 401);
-    const expiry = String(Date.now() + 8 * 60 * 60 * 1000); const nonce = randomBytes(16).toString('hex');
-    return send(res, { ok: true }, 200, { 'Set-Cookie': `yc_superadmin=${expiry}.${nonce}.${sign(`developer.${expiry}.${nonce}`)}; HttpOnly; SameSite=Strict; Path=/api/developer; Max-Age=28800${process.env.NODE_ENV === 'production' ? '; Secure' : ''}` });
+    if (typeof input.passcode !== 'string' || input.passcode.length > 128 || !safeEqual(input.passcode, superadminPasscode)) { await staffFailed('developer', key); recordEvent({ eventType: 'developer_login_failed', req, status: 401 }); return send(res, { error: 'Invalid developer passcode' }, 401); }
+    await pool.query('DELETE FROM staff_login_attempts WHERE role=$1 AND key_hash=$2', ['developer', key]);
+    recordEvent({ eventType: 'developer_login', req, status: 200 });
+    return send(res, { ok: true }, 200, { 'Set-Cookie': await issueStaffSession('developer') });
   }
-  if (req.method === 'GET' && path === '/api/developer/session') return send(res, { configured: !!superadminPasscode, authenticated: developer(req) });
-  if (req.method === 'POST' && path === '/api/developer/logout') return send(res, { ok: true }, 200, { 'Set-Cookie': 'yc_superadmin=; HttpOnly; SameSite=Strict; Path=/api/developer; Max-Age=0' });
-  if (path.startsWith('/api/developer/') && !developer(req)) return send(res, { error: 'Developer access required' }, 401);
+  if (req.method === 'GET' && path === '/api/developer/session') return send(res, { configured: !!superadminPasscode, authenticated: await developer(req) });
+  if (req.method === 'POST' && path === '/api/developer/logout') { await revokeStaffSession('developer', req); return send(res, { ok: true }, 200, { 'Set-Cookie': clearStaffCookie('developer') }); }
+  if (path.startsWith('/api/developer/') && !await developer(req)) return send(res, { error: 'Developer access required' }, 401);
   if (req.method === 'GET' && path === '/api/developer/maintenance') { const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key = 'maintenance_mode'"); return send(res, { enabled: rows[0]?.value === 'on' }); }
   if (req.method === 'PATCH' && path === '/api/developer/maintenance') { const input = await body(req); if (typeof input.enabled !== 'boolean') return send(res, { error: 'enabled must be boolean' }, 400); await pool.query("INSERT INTO admin_settings(key,value) VALUES('maintenance_mode',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [input.enabled ? 'on' : 'off']); recordEvent({ eventType: 'maintenance', req, message: input.enabled ? 'enabled' : 'disabled' }); return send(res, { enabled: input.enabled }); }
   if (req.method === 'GET' && path === '/api/developer/users') {
@@ -207,12 +267,34 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
     return send(res, { users: rows, page, total: count.rows[0].total, pageSize: 25 });
   }
   if (req.method === 'GET' && path === '/api/developer/capacity') {
-    const [connections, throughput, tables] = await Promise.all([
+    const [connections, throughput, tables, database] = await Promise.all([
       pool.query("SELECT current_setting('max_connections')::int AS max, (SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()) AS active"),
-      pool.query("SELECT count(*)::int AS requests_hour, count(*) FILTER (WHERE status >= 500)::int AS errors_hour FROM system_events WHERE event_type = 'request' AND created_at >= now() - interval '1 hour'"),
-      pool.query("SELECT relname AS name, pg_total_relation_size(relid)::bigint AS bytes FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 8")
+      pool.query("SELECT count(*) FILTER (WHERE event_type='request')::int AS requests_hour, count(*) FILTER (WHERE event_type='request' AND created_at>=now()-interval '1 minute')::int AS requests_minute, count(*) FILTER (WHERE event_type='error')::int AS errors_hour FROM system_events WHERE created_at >= now() - interval '1 hour'"),
+      pool.query("SELECT relname AS name, pg_total_relation_size(relid)::bigint AS bytes FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 8"),
+      pool.query('SELECT pg_database_size(current_database())::bigint AS bytes')
     ]);
-    return send(res, { connections: connections.rows[0], throughput: throughput.rows[0], tables: tables.rows, note: 'Database connections and recent API requests only; hosting bandwidth and object storage quotas are available in provider dashboards.' });
+    return send(res, { connections: connections.rows[0], throughput: throughput.rows[0], databaseBytes: database.rows[0].bytes, tables: tables.rows, loggingMode: await getRequestLogging(), note: 'Database connection limit is reported by Postgres. Storage quota, request allowance, and safe concurrent user count depend on the Neon and Vercel plans; check their dashboards or run a load test.' });
+  }
+  if (req.method === 'GET' && path === '/api/developer/request-logs') {
+    const days = Number(new URL(req.url ?? '/', 'http://localhost').searchParams.get('days') ?? 30);
+    if (!Number.isInteger(days) || days < 7 || days > 365) return send(res, { error: 'Choose 7–365 days' }, 400);
+    const { rows } = await pool.query("SELECT count(*)::int AS count, COALESCE(sum(pg_column_size(e)),0)::bigint AS estimated_bytes FROM system_events e WHERE event_type='request' AND created_at<now()-($1::int*interval '1 day')", [days]);
+    return send(res, { days, eligibleCount: rows[0].count, estimatedBytes: rows[0].estimated_bytes, batchSize: 1000 });
+  }
+  if (req.method === 'DELETE' && path === '/api/developer/request-logs') {
+    const input = await body(req); const days = Number(input.days);
+    if (!Number.isInteger(days) || days < 7 || days > 365 || input.confirm !== 'DELETE REQUEST LOGS') return send(res, { error: 'Confirm cleanup and choose 7–365 days' }, 400);
+    const { rows } = await pool.query("WITH doomed AS (SELECT id FROM system_events WHERE event_type='request' AND created_at<now()-($1::int*interval '1 day') ORDER BY created_at LIMIT 1000) DELETE FROM system_events e USING doomed WHERE e.id=doomed.id RETURNING e.id", [days]);
+    recordEvent({ eventType: 'request_logs_deleted', req, message: `${rows.length} request logs older than ${days} days` });
+    return send(res, { deleted: rows.length, batchSize: 1000 });
+  }
+  if (req.method === 'PATCH' && path === '/api/developer/request-logging') {
+    const input = await body(req);
+    if (input.mode !== 'full' && input.mode !== 'errors-only') return send(res, { error: 'Invalid logging mode' }, 400);
+    await pool.query("INSERT INTO admin_settings(key,value) VALUES('request_logging',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [input.mode]);
+    requestLogging = input.mode; requestLoggingExpires = Date.now() + 30_000;
+    recordEvent({ eventType: 'request_logging_changed', req, message: input.mode });
+    return send(res, { mode: input.mode });
   }
   if (req.method === 'GET' && path === '/api/developer/metrics') {
     const [users, activity, storage, busy, errors, orders] = await Promise.all([
@@ -223,28 +305,28 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
       pool.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE created_at >= current_date)::int AS today FROM system_events WHERE event_type = 'error'`),
       pool.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE created_at >= current_date)::int AS today FROM orders`)
     ]);
-    return send(res, { users: users.rows[0], activeUsers15m: activity.rows[0].active, storage: storage.rows[0], busyHours: busy.rows, errors: errors.rows[0], orders: orders.rows[0], generatedAt: new Date().toISOString() });
+    return send(res, { users: users.rows[0], activeUsers15m: activity.rows[0].active, storage: storage.rows[0], busyHours: busy.rows, errors: errors.rows[0], orders: orders.rows[0], loggingMode: await getRequestLogging(), generatedAt: new Date().toISOString() });
   }
   if (req.method === 'GET' && path === '/api/developer/logs') {
     const { rows } = await pool.query(`SELECT id, event_type AS "eventType", method, path, status, message, created_at AS "createdAt" FROM system_events ORDER BY created_at DESC LIMIT 100`);
     return send(res, rows);
   }
   if (req.method === 'POST' && path === '/api/admin/login') {
-    const address = req.socket.remoteAddress ?? 'unknown';
-    const attempts = loginAttempts.get(address);
-    if (attempts && attempts.count >= 5 && attempts.until > Date.now()) return send(res, { error: 'Try again later' }, 429);
+    const key = staffIpKey('admin', req);
+    if (await staffLocked('admin', key)) return send(res, { error: 'Try again later' }, 429);
+    await refreshAdminPasscode();
     const input = await body(req);
-    if (typeof input.passcode !== 'string' || !safeEqual(input.passcode, passcode)) {
-      loginAttempts.set(address, { count: (attempts?.until ?? 0) > Date.now() ? attempts!.count + 1 : 1, until: Date.now() + 15 * 60 * 1000 });
+    if (typeof input.passcode !== 'string' || input.passcode.length > 128 || !await verifyStaffPasscode(input.passcode, passcode)) {
+      await staffFailed('admin', key); recordEvent({ eventType: 'admin_login_failed', req, status: 401 });
       return send(res, { error: 'Invalid passcode' }, 401);
     }
-    loginAttempts.delete(address);
-    const expiry = String(Date.now() + 8 * 60 * 60 * 1000); const token = `${expiry}.${randomBytes(16).toString('hex')}`;
-    return send(res, { ok: true }, 200, { 'Set-Cookie': `yc_admin=${token}.${sign(token)}; HttpOnly; SameSite=Strict; Path=/api/admin; Max-Age=28800${process.env.NODE_ENV === 'production' ? '; Secure' : ''}` });
+    await pool.query('DELETE FROM staff_login_attempts WHERE role=$1 AND key_hash=$2', ['admin', key]);
+    recordEvent({ eventType: 'admin_login', req, status: 200 });
+    return send(res, { ok: true }, 200, { 'Set-Cookie': await issueStaffSession('admin') });
   }
-  if (req.method === 'GET' && path === '/api/admin/session') return send(res, { authenticated: admin(req) });
-  if (req.method === 'POST' && path === '/api/admin/logout') return send(res, { ok: true }, 200, { 'Set-Cookie': 'yc_admin=; HttpOnly; SameSite=Strict; Path=/api/admin; Max-Age=0' });
-  if (path.startsWith('/api/admin/') && !admin(req)) return send(res, { error: 'Unauthorized' }, 401);
+  if (req.method === 'GET' && path === '/api/admin/session') return send(res, { authenticated: await admin(req) });
+  if (req.method === 'POST' && path === '/api/admin/logout') { await revokeStaffSession('admin', req); return send(res, { ok: true }, 200, { 'Set-Cookie': clearStaffCookie('admin') }); }
+  if (path.startsWith('/api/admin/') && !await admin(req)) return send(res, { error: 'Unauthorized' }, 401);
   if (req.method === 'PATCH' && path === '/api/admin/banner') { const input = await body(req); const validView=(view:unknown)=>{const item=view as Record<string,unknown>;return !!item&&['cover','contain'].includes(String(item.fit))&&['top','center','bottom'].includes(String(item.position))&&Number.isInteger(item.zoom)&&Number(item.zoom)>=100&&Number(item.zoom)<=180&&Number.isFinite(Number(item.x))&&Number(item.x)>=0&&Number(item.x)<=100&&Number.isFinite(Number(item.y))&&Number(item.y)>=0&&Number(item.y)<=100}; const mobile=typeof input.mobile==='string'?input.mobile:input.desktop; if (typeof input.desktop !== 'string' || !input.desktop.startsWith('data:image/') || typeof mobile !== 'string' || !mobile.startsWith('data:image/') || !validView(input.desktopView) || !validView(input.mobileView)) return send(res, { error: 'Banner image and view settings are required' }, 400); const desktopView=input.desktopView as {fit:string;position:string;zoom:number;x:number;y:number},mobileView=input.mobileView as {fit:string;position:string;zoom:number;x:number;y:number}; await pool.query('INSERT INTO admin_settings(key,value) VALUES ($1,$2),($3,$4),($5,$6),($7,$8),($9,$10),($11,$12),($13,$14),($15,$16),($17,$18),($19,$20),($21,$22),($23,$24),($25,$26) ON CONFLICT(key) DO UPDATE SET value=excluded.value', ['store_banner_desktop',input.desktop,'store_banner_mobile',mobile,'store_banner_desktop_view',desktopView.fit,'store_banner_mobile_view',mobileView.fit,'store_banner_desktop_position',desktopView.position,'store_banner_mobile_position',mobileView.position,'store_banner_desktop_zoom',String(desktopView.zoom),'store_banner_mobile_zoom',String(mobileView.zoom),'store_banner_desktop_x',String(desktopView.x),'store_banner_desktop_y',String(desktopView.y),'store_banner_mobile_x',String(mobileView.x),'store_banner_mobile_y',String(mobileView.y)]); return send(res, { desktop: input.desktop, mobile, desktopView, mobileView }); }
   if (req.method === 'GET' && path === '/api/admin/orders') {
     const { rows } = await pool.query(`SELECT o.id, o.customer_name AS customer, o.customer_phone AS phone, o.delivery_address AS address, o.customer_note AS note, o.total_ks AS total, o.status, o.cancel_requested AS "cancelRequested", o.created_at AS "createdAt", COALESCE(json_agg(json_build_object('tone', i.product_tone, 'variant', i.variant_index, 'quantity', i.quantity)) FILTER (WHERE i.order_id IS NOT NULL), '[]') AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 100`);
@@ -259,7 +341,7 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
   }
   if (req.method === 'GET' && path === '/api/admin/requests') { const { rows } = await pool.query('SELECT * FROM order_requests WHERE status = \'Open\' ORDER BY created_at DESC'); return send(res, rows); }
   const passcodePath = path === '/api/admin/passcode';
-  if (req.method === 'PATCH' && passcodePath) { const input = await body(req); if (typeof input.current !== 'string' || !safeEqual(input.current, passcode) || typeof input.next !== 'string' || input.next.length < 8) return send(res, { error: 'Invalid passcode change' }, 400); passcode = input.next; await pool.query('INSERT INTO admin_settings(key,value) VALUES (\'passcode\',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [passcode]); return send(res, { ok: true }); }
+  if (req.method === 'PATCH' && passcodePath) { const input = await body(req); if (typeof input.current !== 'string' || !await verifyStaffPasscode(input.current, passcode) || typeof input.next !== 'string' || input.next.length < 12 || input.next.length > 128) return send(res, { error: 'New passcode must be 12–128 characters and current passcode must match' }, 400); const hashed = await hashStaffPasscode(input.next); await pool.query('INSERT INTO admin_settings(key,value) VALUES (\'passcode\',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [hashed]); passcode = hashed; await pool.query("DELETE FROM staff_sessions WHERE role='admin'"); recordEvent({ eventType: 'admin_passcode_changed', req, status: 200 }); return send(res, { ok: true }, 200, { 'Set-Cookie': await issueStaffSession('admin') }); }
   const coverMatch = path.match(/^\/api\/admin\/products\/([^/]+)\/cover$/);
   if (req.method === 'PATCH' && coverMatch) { const input = await body(req); if (!['cover','contain'].includes(String(input.fit)) || !['top','center','bottom'].includes(String(input.position)) || !Number.isInteger(input.zoom) || Number(input.zoom) < 100 || Number(input.zoom) > 200) return send(res, { error: 'Invalid cover view' }, 400); await pool.query('UPDATE products SET cover_fit = $1, cover_position = $2, cover_zoom = $3 WHERE tone = $4', [input.fit, input.position, input.zoom, decodeURIComponent(coverMatch[1])]); return send(res, { ok: true }); }
   const safeProductPath = path.match(/^\/api\/admin\/products\/([^/]+)$/);
@@ -289,7 +371,7 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
 }
 
 export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
-  try { await route(req, res); recordEvent({ eventType: 'request', req, status: res.statusCode }); } catch (error) { console.error(error); recordEvent({ eventType: 'error', req, status: 500, message: (error as Error).message }); if (!res.headersSent) send(res, { error: 'Server error' }, 500); }
+  try { await route(req, res); try { if (await getRequestLogging() === 'full') recordEvent({ eventType: 'request', req, status: res.statusCode }); } catch (error) { console.error('Request logging setting unavailable:', error); } } catch (error) { console.error(error); recordEvent({ eventType: 'error', req, status: 500, message: (error as Error).message }); if (!res.headersSent) send(res, { error: 'Server error' }, 500); }
 }
 
 const server = createServer((req, res) => { handleRequest(req, res); });
