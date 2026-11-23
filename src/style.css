@@ -65,3 +65,5 @@ header a{font-size:14px;color:var(--muted)!important}header nav{gap:8px}header n
 @media(max-width:640px){
   header{padding:12px 16px}.customer{padding:30px 16px 52px}.page-title h1{font-size:32px}.site-footer{align-items:flex-start;flex-direction:column;gap:6px;padding:20px 16px}.site-footer a{font-size:12px}.card:hover{transform:none}.account-card,.invoice,.admin-section{border-radius:14px}.admin-main{padding:24px 16px 48px}
 }
+
+.site-footer{flex-direction:column;justify-content:center;align-items:center;gap:4px}
