@@ -267,13 +267,31 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
     return send(res, { users: rows, page, total: count.rows[0].total, pageSize: 25 });
   }
   if (req.method === 'GET' && path === '/api/developer/capacity') {
-    const [connections, throughput, tables, database] = await Promise.all([
+    const [connections, throughput, tables, database, configured] = await Promise.all([
       pool.query("SELECT current_setting('max_connections')::int AS max, (SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()) AS active"),
       pool.query("SELECT count(*) FILTER (WHERE event_type='request')::int AS requests_hour, count(*) FILTER (WHERE event_type='request' AND created_at>=now()-interval '1 minute')::int AS requests_minute, count(*) FILTER (WHERE event_type='error')::int AS errors_hour FROM system_events WHERE created_at >= now() - interval '1 hour'"),
       pool.query("SELECT relname AS name, pg_total_relation_size(relid)::bigint AS bytes FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 8"),
-      pool.query('SELECT pg_database_size(current_database())::bigint AS bytes')
+      pool.query('SELECT pg_database_size(current_database())::bigint AS bytes'),
+      pool.query("SELECT key,value FROM admin_settings WHERE key IN ('capacity_storage_limit_mb','capacity_requests_per_minute_limit')")
     ]);
-    return send(res, { connections: connections.rows[0], throughput: throughput.rows[0], databaseBytes: database.rows[0].bytes, tables: tables.rows, loggingMode: await getRequestLogging(), note: 'Database connection limit is reported by Postgres. Storage quota, request allowance, and safe concurrent user count depend on the Neon and Vercel plans; check their dashboards or run a load test.' });
+    const values = Object.fromEntries(configured.rows.map(row => [row.key, Number(row.value)]));
+    return send(res, { connections: connections.rows[0], throughput: throughput.rows[0], databaseBytes: database.rows[0].bytes, tables: tables.rows, limits: { storageMb: values.capacity_storage_limit_mb || null, requestsPerMinute: values.capacity_requests_per_minute_limit || null }, loggingMode: await getRequestLogging(), note: 'Connection limit comes from Postgres. Storage and request thresholds are operator alerts, not measured hard limits. Confirm quotas in Neon and Vercel, and use a load test to find safe concurrency.' });
+  }
+  if (req.method === 'PATCH' && path === '/api/developer/capacity') {
+    const input = await body(req);
+    const valid = (value: unknown) => value === null || (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 1_000_000);
+    if (!valid(input.storageMb) || !valid(input.requestsPerMinute)) return send(res, { error: 'Thresholds must be whole numbers from 1 to 1,000,000 or blank' }, 400);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const [key,value] of [['capacity_storage_limit_mb',input.storageMb],['capacity_requests_per_minute_limit',input.requestsPerMinute]]) {
+        if (value === null) await client.query('DELETE FROM admin_settings WHERE key=$1', [key]);
+        else await client.query('INSERT INTO admin_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [key,String(value)]);
+      }
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+    recordEvent({ eventType: 'capacity_thresholds_changed', req, status: 200 });
+    return send(res, { limits: { storageMb: input.storageMb, requestsPerMinute: input.requestsPerMinute } });
   }
   if (req.method === 'GET' && path === '/api/developer/request-logs') {
     const days = Number(new URL(req.url ?? '/', 'http://localhost').searchParams.get('days') ?? 30);
