@@ -1,5 +1,6 @@
 import './style.css';
 import type { Product } from './products';
+window.setTimeout(()=>document.querySelector('.app-splash')?.classList.add('is-visible'),250);
 type Item={tone:string;variant:number;quantity:number}; type Order={id:number;customer:string;phone?:string;address?:string;items:Item[];total:number;status:string;cancelRequested?:boolean;createdAt?:string};
 type CustomerProfile={id:string;email:string|null;name:string;phone:string;city:string;deliveryAddress:string};
 let customerProfile:CustomerProfile|null=null;
