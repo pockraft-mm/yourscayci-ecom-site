@@ -86,3 +86,12 @@ header a{font-size:14px;color:var(--muted)!important}header nav{gap:8px}header n
   .customer{padding-bottom:132px}
   .site-footer{padding-bottom:140px}
 }
+
+@media(max-width:640px){
+  .customer:not(.route-page) .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .customer:not(.route-page) .product-image{aspect-ratio:1/1;height:auto!important}
+  .customer:not(.route-page) .card-copy{padding:12px}
+  .customer:not(.route-page) .card h2{font-size:14px;line-height:1.25;margin-bottom:8px}
+  .customer:not(.route-page) .card-copy b{font-size:13px;white-space:nowrap}
+  .customer:not(.route-page) .view-product{font-size:12px;margin-top:7px}
+}
