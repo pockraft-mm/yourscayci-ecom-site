@@ -1,6 +1,6 @@
 import { loadEnvFile } from 'node:process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import pg from 'pg';
 import { products as catalog } from '../src/products.js';
 import { authorizationUrl, exchangeIdentity, providerConfig, type Provider } from './social.js';
@@ -13,7 +13,7 @@ const superadminPasscode = process.env.SUPERADMIN_PASSCODE ?? '';
 const sessionSecret = process.env.SESSION_SECRET ?? '';
 if (!process.env.DATABASE_URL || !passcode || !sessionSecret) throw new Error('DATABASE_URL, ADMIN_PASSCODE and SESSION_SECRET are required');
 const loginAttempts = new Map<string, { count: number; until: number }>();
-const ready = pool.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_fit text NOT NULL DEFAULT 'cover' CHECK (cover_fit IN ('cover', 'contain')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_position text NOT NULL DEFAULT 'center' CHECK (cover_position IN ('top', 'center', 'bottom')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_zoom integer NOT NULL DEFAULT 100 CHECK (cover_zoom BETWEEN 100 AND 200); CREATE TABLE IF NOT EXISTS customer_accounts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text UNIQUE, password_hash text NOT NULL, name text NOT NULL, phone text NOT NULL, city text NOT NULL, delivery_address text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())").then(() => pool.query("ALTER TABLE customer_accounts ALTER COLUMN email DROP NOT NULL; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS phone_key text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS telegram_id text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS tiktok_id text UNIQUE")).then(() => pool.query("CREATE INDEX IF NOT EXISTS orders_user_date_idx ON orders (user_id, created_at DESC); CREATE TABLE IF NOT EXISTS system_events (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_type text NOT NULL, method text, path text, status integer, user_id bigint, message text, created_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS system_events_created_idx ON system_events (created_at DESC); CREATE INDEX IF NOT EXISTS system_events_type_created_idx ON system_events (event_type, created_at DESC)")).then(() => pool.query("SELECT value FROM admin_settings WHERE key = 'passcode'")).then(({ rows }) => { if (rows[0]?.value) passcode = rows[0].value; });
+const ready = pool.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_fit text NOT NULL DEFAULT 'cover' CHECK (cover_fit IN ('cover', 'contain')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_position text NOT NULL DEFAULT 'center' CHECK (cover_position IN ('top', 'center', 'bottom')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_zoom integer NOT NULL DEFAULT 100 CHECK (cover_zoom BETWEEN 100 AND 200); CREATE TABLE IF NOT EXISTS customer_accounts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text UNIQUE, password_hash text NOT NULL, name text NOT NULL, phone text NOT NULL, city text NOT NULL, delivery_address text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())").then(() => pool.query("ALTER TABLE customer_accounts ALTER COLUMN email DROP NOT NULL; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS phone_key text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS telegram_id text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS tiktok_id text UNIQUE")).then(() => pool.query("CREATE INDEX IF NOT EXISTS orders_user_date_idx ON orders (user_id, created_at DESC); CREATE TABLE IF NOT EXISTS system_events (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_type text NOT NULL, method text, path text, status integer, user_id bigint, message text, created_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS system_events_created_idx ON system_events (created_at DESC); CREATE INDEX IF NOT EXISTS system_events_type_created_idx ON system_events (event_type, created_at DESC); CREATE TABLE IF NOT EXISTS password_resets (token_hash text PRIMARY KEY, user_id bigint NOT NULL REFERENCES customer_accounts(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS password_resets_user_created_idx ON password_resets(user_id,created_at DESC)")).then(() => pool.query("SELECT value FROM admin_settings WHERE key = 'passcode'")).then(({ rows }) => { if (rows[0]?.value) passcode = rows[0].value; });
 
 type Item = { tone: string; variant: number; quantity: number };
 const send = (res: ServerResponse, value: unknown, status = 200, headers: Record<string, string> = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)); };
@@ -118,6 +118,35 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
     } catch { return fail(); }
   }
   if (req.method === 'GET' && path === '/api/customer/session') { const profile = await customerSession(req); return send(res, { authenticated: !!profile, profile }); }
+  if (req.method === 'POST' && path === '/api/customer/password-reset/request') {
+    if (!process.env.RESEND_API_KEY || !process.env.RESET_EMAIL_FROM || !process.env.PUBLIC_SITE_URL) return send(res, { error: 'Email password recovery is not configured yet. Contact the store for help.' }, 503);
+    const input = await body(req); const email = String(input.email ?? '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return send(res, { error: 'Enter a valid email address' }, 400);
+    const { rows } = await pool.query('SELECT id FROM customer_accounts WHERE email=$1', [email]);
+    if (rows.length) {
+      const recent = await pool.query("SELECT 1 FROM password_resets WHERE user_id=$1 AND created_at > now() - interval '5 minutes' LIMIT 1", [rows[0].id]);
+      if (!recent.rows.length) {
+        const token = randomBytes(32).toString('hex'); const hash = createHash('sha256').update(token).digest('hex');
+        const site = new URL(process.env.PUBLIC_SITE_URL); const resetUrl = new URL('/reset-password', site); resetUrl.searchParams.set('token', token);
+        await pool.query("INSERT INTO password_resets(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')", [hash, rows[0].id]);
+        try {
+          const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: process.env.RESET_EMAIL_FROM, to: [email], subject: 'Reset your Yours CayCi password', text: `Use this link to reset your password. It expires in 30 minutes:\n${resetUrl.toString()}\nIf you did not request this, ignore this message.` }) });
+          if (!response.ok) throw new Error(`Resend returned ${response.status}`);
+        } catch (error) {
+          await pool.query('DELETE FROM password_resets WHERE token_hash=$1', [hash]);
+          console.error('Password reset delivery failed:', error);
+          return send(res, { error: 'Could not send a recovery email. Try again later.' }, 503);
+        }
+      }
+    }
+    return send(res, { ok: true, message: 'If an account has that email, a reset link has been sent.' });
+  }
+  if (req.method === 'POST' && path === '/api/customer/password-reset/confirm') {
+    const input = await body(req); const token = String(input.token ?? ''), password = input.password;
+    if (!/^[a-f0-9]{64}$/.test(token) || typeof password !== 'string' || password.length < 8 || password.length > 128) return send(res, { error: 'Invalid or expired link, or password must be 8–128 characters' }, 400);
+    const hash = createHash('sha256').update(token).digest('hex'); const client = await pool.connect();
+    try { await client.query('BEGIN'); const { rows } = await client.query('SELECT user_id FROM password_resets WHERE token_hash=$1 AND expires_at>now() FOR UPDATE', [hash]); if (!rows.length) { await client.query('ROLLBACK'); return send(res, { error: 'Reset link is invalid or expired' }, 400); } await client.query('UPDATE customer_accounts SET password_hash=$1 WHERE id=$2', [passwordHash(password), rows[0].user_id]); await client.query('DELETE FROM password_resets WHERE user_id=$1', [rows[0].user_id]); await client.query('COMMIT'); return send(res, { ok: true }); } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+  }
   if (req.method === 'POST' && path === '/api/customer/signup') {
     const input = await body(req); const profile = profileFields(input); const email = String(input.email ?? '').trim().toLowerCase(); const password = input.password;
     const key = phoneKey(profile.phone);
