@@ -78,7 +78,7 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
   await customerReady;
   const path = new URL(req.url ?? '/', 'http://localhost').pathname;
   if (req.method === 'GET' && path === '/api/products') return send(res, await listProducts());
-  if (req.method === 'GET' && path === '/api/store/banner') { const { rows } = await pool.query('SELECT value FROM admin_settings WHERE key = $1', ['store_banner']); return send(res, { image: rows[0]?.value ?? null }); }
+  if (req.method === 'GET' && path === '/api/store/banner') { const { rows } = await pool.query('SELECT key, value FROM admin_settings WHERE key IN ($1, $2, $3)', ['store_banner_desktop','store_banner_mobile','store_banner']); const values = Object.fromEntries(rows.map(row => [row.key, row.value])); return send(res, { desktop: values.store_banner_desktop ?? values.store_banner ?? null, mobile: values.store_banner_mobile ?? values.store_banner_desktop ?? values.store_banner ?? null }); }
   if (req.method === 'GET' && path === '/api/customer/providers') return send(res, { telegram: !!providerConfig('telegram'), tiktok: !!providerConfig('tiktok') });
   const oauth = path.match(/^\/api\/customer\/oauth\/(telegram|tiktok)\/(start|callback)$/);
   if (req.method === 'GET' && oauth) {
@@ -168,7 +168,7 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
   if (req.method === 'GET' && path === '/api/admin/session') return send(res, { authenticated: admin(req) });
   if (req.method === 'POST' && path === '/api/admin/logout') return send(res, { ok: true }, 200, { 'Set-Cookie': 'yc_admin=; HttpOnly; SameSite=Strict; Path=/api/admin; Max-Age=0' });
   if (path.startsWith('/api/admin/') && !admin(req)) return send(res, { error: 'Unauthorized' }, 401);
-  if (req.method === 'PATCH' && path === '/api/admin/banner') { const input = await body(req); if (typeof input.image !== 'string' || !input.image.startsWith('data:image/')) return send(res, { error: 'A valid image is required' }, 400); await pool.query('INSERT INTO admin_settings(key,value) VALUES ($1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value', ['store_banner', input.image]); return send(res, { image: input.image }); }
+  if (req.method === 'PATCH' && path === '/api/admin/banner') { const input = await body(req); if (typeof input.desktop !== 'string' || !input.desktop.startsWith('data:image/') || typeof input.mobile !== 'string' || !input.mobile.startsWith('data:image/')) return send(res, { error: 'Desktop and mobile banner images are required' }, 400); await pool.query('INSERT INTO admin_settings(key,value) VALUES ($1,$2),($3,$4) ON CONFLICT(key) DO UPDATE SET value=excluded.value', ['store_banner_desktop', input.desktop, 'store_banner_mobile', input.mobile]); return send(res, { desktop: input.desktop, mobile: input.mobile }); }
   if (req.method === 'GET' && path === '/api/admin/orders') {
     const { rows } = await pool.query(`SELECT o.id, o.customer_name AS customer, o.customer_phone AS phone, o.delivery_address AS address, o.customer_note AS note, o.total_ks AS total, o.status, o.cancel_requested AS "cancelRequested", o.created_at AS "createdAt", COALESCE(json_agg(json_build_object('tone', i.product_tone, 'variant', i.variant_index, 'quantity', i.quantity)) FILTER (WHERE i.order_id IS NOT NULL), '[]') AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 100`);
     return send(res, rows);
