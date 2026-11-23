@@ -66,6 +66,8 @@ const authCookie = (id: string) => { const expiry = String(Date.now() + 30 * 24 
 const passwordHash = (password: string) => { const salt = randomBytes(16).toString('hex'); return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`; };
 const verifyPassword = (password: string, stored: string) => { const [salt, hash] = stored.split(':'); if (!salt || !hash || !/^[a-f0-9]{128}$/.test(hash)) return false; return timingSafeEqual(scryptSync(password, salt, 64), Buffer.from(hash, 'hex')); };
 const profileFields = (input: Record<string, unknown>) => ({ name: String(input.name ?? '').trim(), phone: String(input.phone ?? '').trim(), city: String(input.city ?? '').trim(), deliveryAddress: String(input.deliveryAddress ?? '').trim() });
+const optionalEmail = (input: Record<string, unknown>) => { const value = String(input.email ?? '').trim().toLowerCase(); return value || null; };
+const validEmail = (email: string | null) => email === null || (email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
 const validProfile = (p: ReturnType<typeof profileFields>) => p.name.length > 0 && p.name.length <= 120 && /^\+?[0-9\s-]{7,20}$/.test(p.phone) && p.city.length > 0 && p.city.length <= 120 && p.deliveryAddress.length > 0 && p.deliveryAddress.length <= 500;
 const phoneKey = (value: string) => { const digits = value.replace(/\D/g, ''); return /^09\d{7,9}$/.test(digits) ? `95${digits.slice(1)}` : /^959\d{7,9}$/.test(digits) ? digits : null; };
 const customerReady = ready.then(async () => {
@@ -225,9 +227,9 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
   if (path.startsWith('/api/customer/')) {
     const profile = await customerSession(req); if (!profile) return send(res, { error: 'Sign in to continue' }, 401);
     if (req.method === 'PATCH' && path === '/api/customer/profile') {
-      const fields = profileFields(await body(req)); const key = phoneKey(fields.phone); if (!validProfile(fields) || !key) return send(res, { error: 'Enter a name, Myanmar phone, city/town and delivery address' }, 400);
-      try { const { rows } = await pool.query('UPDATE customer_accounts SET name=$1, phone=$2, phone_key=$3, city=$4, delivery_address=$5 WHERE id=$6 RETURNING id::text, email, name, phone, city, delivery_address AS "deliveryAddress"', [fields.name,fields.phone,key,fields.city,fields.deliveryAddress,profile.id]); return send(res, { profile: rows[0] }); }
-      catch (error) { if ((error as { code?: string }).code === '23505') return send(res, { error: 'This phone number is already used by another account' }, 409); throw error; }
+      const input = await body(req); const fields = profileFields(input); const email = optionalEmail(input); const key = phoneKey(fields.phone); if (!validProfile(fields) || !key || !validEmail(email)) return send(res, { error: 'Enter a valid email, name, Myanmar phone, city/town and delivery address' }, 400);
+      try { const { rows } = await pool.query('UPDATE customer_accounts SET email=$1, name=$2, phone=$3, phone_key=$4, city=$5, delivery_address=$6 WHERE id=$7 RETURNING id::text, email, name, phone, city, delivery_address AS "deliveryAddress"', [email,fields.name,fields.phone,key,fields.city,fields.deliveryAddress,profile.id]); return send(res, { profile: rows[0] }); }
+      catch (error) { if ((error as { code?: string }).code === '23505') return send(res, { error: 'That email or phone number is already used by another account' }, 409); throw error; }
     }
     if (req.method === 'GET' && path === '/api/customer/orders') {
       const { rows } = await pool.query(`SELECT o.id, o.customer_name AS customer, o.customer_phone AS phone, o.delivery_address AS address, o.customer_note AS note, o.total_ks AS total, o.status, o.cancel_requested AS "cancelRequested", o.created_at AS "createdAt", COALESCE(json_agg(json_build_object('tone', i.product_tone, 'variant', i.variant_index, 'quantity', i.quantity)) FILTER (WHERE i.order_id IS NOT NULL), '[]') AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id WHERE o.user_id = $1 GROUP BY o.id ORDER BY o.created_at DESC`, [profile.id]);
