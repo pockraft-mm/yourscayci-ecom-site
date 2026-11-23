@@ -9,16 +9,18 @@ try { loadEnvFile('.env'); } catch { /* optional */ }
 try { loadEnvFile('.env.local'); } catch { /* optional */ }
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL?.replace('sslmode=require', 'sslmode=verify-full'), max: 5, ssl: { rejectUnauthorized: true } });
 let passcode = process.env.ADMIN_PASSCODE ?? '';
+const superadminPasscode = process.env.SUPERADMIN_PASSCODE ?? '';
 const sessionSecret = process.env.SESSION_SECRET ?? '';
 if (!process.env.DATABASE_URL || !passcode || !sessionSecret) throw new Error('DATABASE_URL, ADMIN_PASSCODE and SESSION_SECRET are required');
 const loginAttempts = new Map<string, { count: number; until: number }>();
-const ready = pool.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_fit text NOT NULL DEFAULT 'cover' CHECK (cover_fit IN ('cover', 'contain')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_position text NOT NULL DEFAULT 'center' CHECK (cover_position IN ('top', 'center', 'bottom')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_zoom integer NOT NULL DEFAULT 100 CHECK (cover_zoom BETWEEN 100 AND 200); CREATE TABLE IF NOT EXISTS customer_accounts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text UNIQUE, password_hash text NOT NULL, name text NOT NULL, phone text NOT NULL, city text NOT NULL, delivery_address text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())").then(() => pool.query("ALTER TABLE customer_accounts ALTER COLUMN email DROP NOT NULL; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS phone_key text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS telegram_id text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS tiktok_id text UNIQUE")).then(() => pool.query("CREATE INDEX IF NOT EXISTS orders_user_date_idx ON orders (user_id, created_at DESC)")).then(() => pool.query("SELECT value FROM admin_settings WHERE key = 'passcode'")).then(({ rows }) => { if (rows[0]?.value) passcode = rows[0].value; });
+const ready = pool.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_fit text NOT NULL DEFAULT 'cover' CHECK (cover_fit IN ('cover', 'contain')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_position text NOT NULL DEFAULT 'center' CHECK (cover_position IN ('top', 'center', 'bottom')); ALTER TABLE products ADD COLUMN IF NOT EXISTS cover_zoom integer NOT NULL DEFAULT 100 CHECK (cover_zoom BETWEEN 100 AND 200); CREATE TABLE IF NOT EXISTS customer_accounts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text UNIQUE, password_hash text NOT NULL, name text NOT NULL, phone text NOT NULL, city text NOT NULL, delivery_address text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())").then(() => pool.query("ALTER TABLE customer_accounts ALTER COLUMN email DROP NOT NULL; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS phone_key text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS telegram_id text UNIQUE; ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS tiktok_id text UNIQUE")).then(() => pool.query("CREATE INDEX IF NOT EXISTS orders_user_date_idx ON orders (user_id, created_at DESC); CREATE TABLE IF NOT EXISTS system_events (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_type text NOT NULL, method text, path text, status integer, user_id bigint, message text, created_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS system_events_created_idx ON system_events (created_at DESC); CREATE INDEX IF NOT EXISTS system_events_type_created_idx ON system_events (event_type, created_at DESC)")).then(() => pool.query("SELECT value FROM admin_settings WHERE key = 'passcode'")).then(({ rows }) => { if (rows[0]?.value) passcode = rows[0].value; });
 
 type Item = { tone: string; variant: number; quantity: number };
 const send = (res: ServerResponse, value: unknown, status = 200, headers: Record<string, string> = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)); };
 const safeEqual = (a: string, b: string) => { const left = createHmac('sha256', sessionSecret).update(a).digest(); const right = createHmac('sha256', sessionSecret).update(b).digest(); return timingSafeEqual(left, right); };
 const sign = (value: string) => createHmac('sha256', sessionSecret).update(value).digest('hex');
 const admin = (req: IncomingMessage) => { const cookie = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_admin='))?.slice(9); if (!cookie) return false; const [expiry, nonce, mac] = cookie.split('.'); return !!expiry && !!nonce && !!mac && Number(expiry) > Date.now() && safeEqual(mac, sign(`${expiry}.${nonce}`)); };
+const developer = (req: IncomingMessage) => { const cookie = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_superadmin='))?.slice(13); if (!cookie) return false; const [expiry, nonce, mac] = cookie.split('.'); return !!expiry && !!nonce && !!mac && Number(expiry) > Date.now() && safeEqual(mac, sign(`developer.${expiry}.${nonce}`)); };
 type Customer = { id: string; email: string | null; name: string; phone: string; city: string; deliveryAddress: string };
 const customerCookie = (req: IncomingMessage) => req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_customer='))?.slice(12);
 const customerSession = async (req: IncomingMessage): Promise<Customer | null> => {
@@ -46,6 +48,7 @@ const customerAttempts = new Map<string, { count: number; until: number }>();
 const oauthStateCookie = (provider: Provider) => `yc_oauth_${provider}`;
 const clearOauthCookie = (provider: Provider) => `${oauthStateCookie(provider)}=; HttpOnly; SameSite=Lax; Path=/api/customer/oauth/${provider}/callback; Max-Age=0`;
 const body = async (req: IncomingMessage) => { let text = ''; for await (const chunk of req) { text += chunk; if (text.length > 50_000_000) throw new Error('Request too large'); } return JSON.parse(text) as Record<string, unknown>; };
+const recordEvent = (event: { eventType: string; req: IncomingMessage; status?: number; message?: string }) => { const cookie = event.req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('yc_customer='))?.slice(12); const userId = cookie?.split('.')[0]; void pool.query('INSERT INTO system_events(event_type,method,path,status,user_id,message) VALUES($1,$2,$3,$4,$5,$6)', [event.eventType, event.req.method ?? null, new URL(event.req.url ?? '/', 'http://localhost').pathname, event.status ?? null, userId && /^\d+$/.test(userId) ? userId : null, event.message?.slice(0, 500) ?? null]).catch(() => undefined); };
 const landingAsset = (key: string) => ({ 'chocobrown-1.png': 'product-stocking-chocobrown.png', 'magicblack-1.jpg': 'product-stocking-magicblack-1.jpg', 'skincolor-1.png': 'product-stocking-skincolor-1.png' }[key] ?? key);
 const imageUrl = (key: string) => { if (key.startsWith('data:image/') || key.startsWith('https://')) return key; const clean = decodeURIComponent(key.replace(/^\/products\//, '').replace(/^\//, '')); return `/${landingAsset(clean).split('/').map(encodeURIComponent).join('/')}`; };
 
@@ -152,6 +155,31 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
     if (req.method === 'GET') { const { rows } = await pool.query('SELECT o.id, o.customer_name AS customer, o.customer_phone AS phone, o.delivery_address AS address, o.customer_note AS note, o.total_ks AS total, o.status, o.cancel_requested AS "cancelRequested", o.created_at AS "createdAt", COALESCE(json_agg(json_build_object(\'tone\', i.product_tone, \'variant\', i.variant_index, \'quantity\', i.quantity)) FILTER (WHERE i.order_id IS NOT NULL), \'[]\') AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id WHERE o.id = $1 GROUP BY o.id', [publicOrder[1]]); return send(res, rows[0]); }
     if (req.method === 'POST') { const input = await body(req); if (!['cancel','delivery_change','other'].includes(String(input.type)) || typeof input.message !== 'string' || !input.message.trim()) return send(res, { error: 'Request type and message are required' }, 400); await pool.query('INSERT INTO order_requests (order_id, request_type, message) VALUES ($1, $2, $3)', [publicOrder[1], input.type, input.message.trim()]); if (input.type === 'cancel') await pool.query("UPDATE orders SET cancel_requested = true, status = 'Cancelled' WHERE id = $1 AND status NOT IN ('Shipped','Delivered')", [publicOrder[1]]); return send(res, { ok: true }, 201); }
   }
+  if (req.method === 'POST' && path === '/api/developer/login') {
+    if (!superadminPasscode) return send(res, { error: 'Developer access is not configured' }, 503);
+    const input = await body(req);
+    if (typeof input.passcode !== 'string' || !safeEqual(input.passcode, superadminPasscode)) return send(res, { error: 'Invalid developer passcode' }, 401);
+    const expiry = String(Date.now() + 8 * 60 * 60 * 1000); const nonce = randomBytes(16).toString('hex');
+    return send(res, { ok: true }, 200, { 'Set-Cookie': `yc_superadmin=${expiry}.${nonce}.${sign(`developer.${expiry}.${nonce}`)}; HttpOnly; SameSite=Strict; Path=/api/developer; Max-Age=28800${process.env.NODE_ENV === 'production' ? '; Secure' : ''}` });
+  }
+  if (req.method === 'GET' && path === '/api/developer/session') return send(res, { configured: !!superadminPasscode, authenticated: developer(req) });
+  if (req.method === 'POST' && path === '/api/developer/logout') return send(res, { ok: true }, 200, { 'Set-Cookie': 'yc_superadmin=; HttpOnly; SameSite=Strict; Path=/api/developer; Max-Age=0' });
+  if (path.startsWith('/api/developer/') && !developer(req)) return send(res, { error: 'Developer access required' }, 401);
+  if (req.method === 'GET' && path === '/api/developer/metrics') {
+    const [users, activity, storage, busy, errors, orders] = await Promise.all([
+      pool.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE created_at >= current_date)::int AS today, count(*) FILTER (WHERE created_at >= date_trunc('month', now()))::int AS month FROM customer_accounts`),
+      pool.query(`SELECT count(DISTINCT user_id)::int AS active FROM system_events WHERE event_type = 'request' AND user_id IS NOT NULL AND created_at >= now() - interval '15 minutes'`),
+      pool.query(`SELECT pg_database_size(current_database())::bigint AS database_bytes, COALESCE((SELECT sum(length(images::text)) FROM products),0)::bigint AS product_image_bytes, COALESCE((SELECT sum(length(value)) FROM admin_settings),0)::bigint AS settings_bytes`),
+      pool.query(`SELECT extract(hour from created_at)::int AS hour, count(*)::int AS requests FROM system_events WHERE event_type = 'request' AND created_at >= now() - interval '30 days' GROUP BY 1 ORDER BY requests DESC LIMIT 8`),
+      pool.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE created_at >= current_date)::int AS today FROM system_events WHERE event_type = 'error'`),
+      pool.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE created_at >= current_date)::int AS today FROM orders`)
+    ]);
+    return send(res, { users: users.rows[0], activeUsers15m: activity.rows[0].active, storage: storage.rows[0], busyHours: busy.rows, errors: errors.rows[0], orders: orders.rows[0], generatedAt: new Date().toISOString() });
+  }
+  if (req.method === 'GET' && path === '/api/developer/logs') {
+    const { rows } = await pool.query(`SELECT id, event_type AS "eventType", method, path, status, message, created_at AS "createdAt" FROM system_events ORDER BY created_at DESC LIMIT 100`);
+    return send(res, rows);
+  }
   if (req.method === 'POST' && path === '/api/admin/login') {
     const address = req.socket.remoteAddress ?? 'unknown';
     const attempts = loginAttempts.get(address);
@@ -212,7 +240,7 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
 }
 
 export async function handleRequest(req: IncomingMessage, res: ServerResponse) {
-  try { await route(req, res); } catch (error) { console.error(error); if (!res.headersSent) send(res, { error: 'Server error' }, 500); }
+  try { await route(req, res); recordEvent({ eventType: 'request', req, status: res.statusCode }); } catch (error) { console.error(error); recordEvent({ eventType: 'error', req, status: 500, message: (error as Error).message }); if (!res.headersSent) send(res, { error: 'Server error' }, 500); }
 }
 
 const server = createServer((req, res) => { handleRequest(req, res); });
