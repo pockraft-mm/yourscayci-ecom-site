@@ -3,6 +3,7 @@ import type { Product } from './products';
 type Item={tone:string;variant:number;quantity:number}; type Order={id:number;customer:string;phone?:string;address?:string;items:Item[];total:number;status:string;cancelRequested?:boolean;createdAt?:string};
 type CustomerProfile={id:string;email:string|null;name:string;phone:string;city:string;deliveryAddress:string};
 let customerProfile:CustomerProfile|null=null;
+let customerSessionChecked=false;
 let socialProviders={telegram:false,tiktok:false};
 const API='/api'; let products:Product[]=[],orders:Order[]=JSON.parse(localStorage.getItem('yc_orders_cache')||'[]'),cart:Item[]=JSON.parse(localStorage.getItem('yc_cart')||'[]'),isAdmin=false,isDeveloper=false,tab='orders',orderTab='active',orderDate='';
 let locale: 'en'|'mm' = localStorage.getItem('yc_locale')==='mm'?'mm':'en';
@@ -174,7 +175,7 @@ function authPage(route:string){
 const telegramInitData = new URLSearchParams(location.hash.slice(1)).get('tgWebAppData') || '';
 if(telegramInitData)sessionStorage.setItem('yc_telegram_init',telegramInitData);
 const miniAppData=()=>telegramInitData||sessionStorage.getItem('yc_telegram_init')||'';
-function socialButtons(){return miniAppData()?'':`<div class="social-signin"><a href="https://t.me/yourscayciorderbot?startapp">${tx('Shop in Telegram','Telegram မှ စျေးဝယ်ရန်')}</a></div>`}
+function socialButtons(){return !customerSessionChecked||customerProfile||miniAppData()?'':`<div class="social-signin"><a href="https://t.me/yourscayciorderbot?startapp">${tx('Shop in Telegram','Telegram မှ စျေးဝယ်ရန်')}</a></div>`}
 async function storefrontSession(){
   const signIn=async()=>{const result=await api<{profile:CustomerProfile}>('/customer/telegram-miniapp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:miniAppData()})});sessionStorage.removeItem('yc_telegram_init');return {authenticated:true,profile:result.profile}};
   if(telegramInitData)return signIn();
@@ -265,8 +266,9 @@ async function start(){
     render();
     const [session,providers]=await Promise.all([sessionRequest,providersRequest]);
     if(session)customerProfile=session.profile;
+    customerSessionChecked=!!session;
     if(providers)socialProviders=providers;
-    if(session?.profile||providers)render();
+    if(session||providers)render();
     if(sessionError)notify(sessionError);
   }catch{if(products.length){render();return}document.querySelector('#app')!.innerHTML='<main class="empty">Store unavailable</main>'}
 }start();
