@@ -80,6 +80,11 @@ async function placeOrder(customer: string, phone: string, address: string, note
 export async function route(req: IncomingMessage, res: ServerResponse) {
   await customerReady;
   const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+  if (path === '/api/store/status' && req.method === 'GET') { const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key = 'maintenance_mode'"); return send(res, { maintenance: rows[0]?.value === 'on' }); }
+  if (!path.startsWith('/api/developer/') && !path.startsWith('/api/admin/') && path !== '/api/store/status') {
+    const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key = 'maintenance_mode'");
+    if (rows[0]?.value === 'on') return send(res, { error: 'Store under maintenance', maintenance: true }, 503);
+  }
   if (req.method === 'GET' && path === '/api/products') return send(res, await listProducts());
   if (req.method === 'GET' && path === '/api/store/banner') { const { rows } = await pool.query('SELECT key, value FROM admin_settings WHERE key IN ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)', ['store_banner_desktop','store_banner_mobile','store_banner','store_banner_desktop_view','store_banner_mobile_view','store_banner_desktop_position','store_banner_mobile_position','store_banner_desktop_zoom','store_banner_mobile_zoom','store_banner_desktop_x','store_banner_desktop_y','store_banner_mobile_x','store_banner_mobile_y']); const values = Object.fromEntries(rows.map(row => [row.key, row.value])); const view=(key:string,positionKey:string,zoomKey:string,xKey:string,yKey:string)=>({ fit: values[key] === 'contain' ? 'contain' : 'cover', position: ['top','center','bottom'].includes(values[positionKey]) ? values[positionKey] : 'center', zoom: Math.min(180,Math.max(100,Number(values[zoomKey]||100))), x: Math.min(100,Math.max(0,Number(values[xKey]||50))), y: Math.min(100,Math.max(0,Number(values[yKey]||50))) }); return send(res, { desktop: values.store_banner_desktop ?? values.store_banner ?? null, mobile: values.store_banner_mobile ?? values.store_banner_desktop ?? values.store_banner ?? null, desktopView: view('store_banner_desktop_view','store_banner_desktop_position','store_banner_desktop_zoom','store_banner_desktop_x','store_banner_desktop_y'), mobileView: view('store_banner_mobile_view','store_banner_mobile_position','store_banner_mobile_zoom','store_banner_mobile_x','store_banner_mobile_y') }); }
   if (req.method === 'GET' && path === '/api/customer/providers') return send(res, { telegram: !!providerConfig('telegram'), tiktok: !!providerConfig('tiktok') });
@@ -165,6 +170,21 @@ export async function route(req: IncomingMessage, res: ServerResponse) {
   if (req.method === 'GET' && path === '/api/developer/session') return send(res, { configured: !!superadminPasscode, authenticated: developer(req) });
   if (req.method === 'POST' && path === '/api/developer/logout') return send(res, { ok: true }, 200, { 'Set-Cookie': 'yc_superadmin=; HttpOnly; SameSite=Strict; Path=/api/developer; Max-Age=0' });
   if (path.startsWith('/api/developer/') && !developer(req)) return send(res, { error: 'Developer access required' }, 401);
+  if (req.method === 'GET' && path === '/api/developer/maintenance') { const { rows } = await pool.query("SELECT value FROM admin_settings WHERE key = 'maintenance_mode'"); return send(res, { enabled: rows[0]?.value === 'on' }); }
+  if (req.method === 'PATCH' && path === '/api/developer/maintenance') { const input = await body(req); if (typeof input.enabled !== 'boolean') return send(res, { error: 'enabled must be boolean' }, 400); await pool.query("INSERT INTO admin_settings(key,value) VALUES('maintenance_mode',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [input.enabled ? 'on' : 'off']); recordEvent({ eventType: 'maintenance', req, message: input.enabled ? 'enabled' : 'disabled' }); return send(res, { enabled: input.enabled }); }
+  if (req.method === 'GET' && path === '/api/developer/users') {
+    const url = new URL(req.url ?? '/', 'http://localhost'); const page = Math.max(1, Math.min(100000, Number.parseInt(url.searchParams.get('page') ?? '1', 10) || 1));
+    const [{ rows }, count] = await Promise.all([pool.query('SELECT id::text, email, name, phone, city, delivery_address AS "deliveryAddress", created_at AS "createdAt" FROM customer_accounts ORDER BY created_at DESC, id DESC LIMIT 25 OFFSET $1', [(page - 1) * 25]), pool.query('SELECT count(*)::int AS total FROM customer_accounts')]);
+    return send(res, { users: rows, page, total: count.rows[0].total, pageSize: 25 });
+  }
+  if (req.method === 'GET' && path === '/api/developer/capacity') {
+    const [connections, throughput, tables] = await Promise.all([
+      pool.query("SELECT current_setting('max_connections')::int AS max, (SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()) AS active"),
+      pool.query("SELECT count(*)::int AS requests_hour, count(*) FILTER (WHERE status >= 500)::int AS errors_hour FROM system_events WHERE event_type = 'request' AND created_at >= now() - interval '1 hour'"),
+      pool.query("SELECT relname AS name, pg_total_relation_size(relid)::bigint AS bytes FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 8")
+    ]);
+    return send(res, { connections: connections.rows[0], throughput: throughput.rows[0], tables: tables.rows, note: 'Database connections and recent API requests only; hosting bandwidth and object storage quotas are available in provider dashboards.' });
+  }
   if (req.method === 'GET' && path === '/api/developer/metrics') {
     const [users, activity, storage, busy, errors, orders] = await Promise.all([
       pool.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE created_at >= current_date)::int AS today, count(*) FILTER (WHERE created_at >= date_trunc('month', now()))::int AS month FROM customer_accounts`),
